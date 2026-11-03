@@ -17,6 +17,8 @@ find_package(catkin REQUIRED COMPONENTS
   control_toolbox
   realtime_tools
   geometry_msgs
+  nav_msgs
+  tf
 )
 
 ## System dependencies are found with CMake's conventions
@@ -111,7 +113,7 @@ find_package(catkin REQUIRED COMPONENTS
 catkin_package(
  INCLUDE_DIRS include
  LIBRARIES hero_chassis_controller
- CATKIN_DEPENDS roscpp controller_interface hardware_interface pluginlib control_toolbox realtime_tools geometry_msgs
+ CATKIN_DEPENDS roscpp controller_interface hardware_interface pluginlib control_toolbox realtime_tools geometry_msgs nav_msgs tf
 )
 
 ###########

@@ -7,6 +7,8 @@
 #include <realtime_tools/realtime_buffer.h>
 #include <ros/ros.h>
 #include <geometry_msgs/Twist.h> // 用于接收 cmd_vel
+#include <nav_msgs/Odometry.h>
+#include <tf/transform_broadcaster.h>
 
 namespace hero_chassis_controller {
 
@@ -23,9 +25,6 @@ public:
     void starting(const ros::Time &time) override;
     void stopping(const ros::Time &time) override;
 
-    // 回调函数，接收键盘指令
-    void cmdVelCallback(const geometry_msgs::Twist& msg);
-
 private:
     hardware_interface::JointHandle front_left_joint_;
     hardware_interface::JointHandle front_right_joint_;
@@ -39,22 +38,25 @@ private:
     control_toolbox::Pid pid_back_right_;
 
     // 存储期望速度（使用实时缓冲区保证线程安全）
-    // realtime_tools::RealtimeBuffer<double> target_vel_fl_;
-    // realtime_tools::RealtimeBuffer<double> target_vel_fr_;
-    // realtime_tools::RealtimeBuffer<double> target_vel_bl_;
-    // realtime_tools::RealtimeBuffer<double> target_vel_br_;
-
-    // 订阅者
-    ros::Subscriber cmd_vel_sub_;
-
-    // 目标速度缓冲区（非实时线程写入，实时线程读取）
-    realtime_tools::RealtimeBuffer<geometry_msgs::Twist> cmd_vel_buffer_;
+    realtime_tools::RealtimeBuffer<double> target_vel_fl_;
+    realtime_tools::RealtimeBuffer<double> target_vel_fr_;
+    realtime_tools::RealtimeBuffer<double> target_vel_bl_;
+    realtime_tools::RealtimeBuffer<double> target_vel_br_;
     
     // 物理参数
     double wheel_radius_;
     double track_width_;
     double wheelbase_;
     double max_effort_;
+
+    // 里程计相关 
+    ros::Publisher odom_pub_;
+    tf::TransformBroadcaster odom_broadcaster_;
+    
+    double x_;      // 当前 X 坐标
+    double y_;      // 当前 Y 坐标
+    double th_;     // 当前航向角 (yaw)
+    ros::Time last_time_; // 上一次更新里程计的时间
 };
 
 } // namespace hero_chassis_controller
