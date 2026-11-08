@@ -39,10 +39,18 @@ bool HeroChassisController::init(hardware_interface::EffortJointInterface *effor
     target_vel_bl_.writeFromNonRT(0.0);
     target_vel_br_.writeFromNonRT(0.0);
 
+    // 初始化 cmd_vel 订阅器 (话题名就是 /cmd_vel)
+    cmd_vel_sub_ = controller_nh.subscribe("/cmd_vel", 1, &HeroChassisController::cmdVelCallback, this);
+    geometry_msgs::Twist init_twist;
+    cmd_vel_buffer_.writeFromNonRT(init_twist);
+
     // 初始化里程计发布者
     odom_pub_ = controller_nh.advertise<nav_msgs::Odometry>("/odom", 50);
     x_ = 0.0; y_ = 0.0; th_ = 0.0;
     last_time_ = ros::Time::now();
+
+    // 读取模式参数，默认使用底盘局部模式
+    controller_nh.param<bool>("use_global_frame", use_global_frame_, false);
 
     return true;
 }
@@ -61,45 +69,60 @@ void HeroChassisController::stopping(const ros::Time &time) {
     back_right_joint_.setCommand(0.0);
 }
 
+// 键盘指令回调函数
+void HeroChassisController::cmdVelCallback(const geometry_msgs::Twist& msg) {
+    cmd_vel_buffer_.writeFromNonRT(msg);
+}
+
 void HeroChassisController::update(const ros::Time &time, const ros::Duration &period) {
     
-    //心型轨迹
-    static ros::Time start_time = ros::Time::now();
-    double t = (time - start_time).toSec();
+    // 1. 获取最新的速度指令
+    geometry_msgs::Twist cmd_vel = *(cmd_vel_buffer_.readFromRT());
 
-    const double pi = 3.1415926;
-    const double tau = 18.5 * pi * track_width_ / 12.0; 
+    // 2. 逆运动学计算（麦克纳姆轮标准公式）
+    // 按键盘后接收 Vx: 前后， Vy: 左右， Wz: 旋转
+    double Vx = cmd_vel.linear.x;
+    double Vy = cmd_vel.linear.y;
+    double Wz = cmd_vel.angular.z;
 
+        // 全局/局部速度坐标系变换 
+    if (use_global_frame_) {
+        try {
+            // 查询 odom 到 base_link 的最新变换
+            tf::StampedTransform transform;
+            tf_listener_.lookupTransform("odom", "base_link", ros::Time(0), transform);
+            
+            // 提取当前的偏航角 (Yaw)
+            double roll, pitch, yaw;
+            tf::Matrix3x3(transform.getRotation()).getRPY(roll, pitch, yaw);
+            
+            // 旋转矩阵变换（将全局 Vx, Vy 转到 底盘坐标系下）
+            // 原理：如果你在世界坐标系朝正东走，但车头朝北，你实际需要向右平移
+            double local_vx = Vx * cos(yaw) + Vy * sin(yaw);
+            double local_vy = -Vx * sin(yaw) + Vy * cos(yaw);
+            
+            Vx = local_vx;
+            Vy = local_vy;
+            // 角速度 Wz 不需要转换，因为它本身就是相对的
+        } catch (tf::TransformException &ex) {
+            ROS_WARN_THROTTLE(1.0, "TF 查询失败: %s", ex.what());
+        }
+    }
+
+    // 3. 逆运动学 
     double Lx = track_width_ / 2.0;
     double Ly = wheelbase_ / 2.0;
-    double l_sum = Lx + Ly; // 中心到轮子的曼哈顿距离
+    double L = Lx + Ly; 
 
-    double target_vel_fl = 0.0;
-    double target_vel_fr = 0.0;
-    double target_vel_bl = 0.0;
-    double target_vel_br = 0.0;
+    double v_fl = Vx - Vy - L * Wz;
+    double v_fr = Vx + Vy + L * Wz;
+    double v_bl = Vx + Vy - L * Wz;
+    double v_br = Vx - Vy + L * Wz;
 
-    if (t <= tau) {
-        target_vel_fl = 1.20 / wheel_radius_;
-        target_vel_fr = 2.40 / wheel_radius_;
-        target_vel_bl = 1.20 / wheel_radius_;
-        target_vel_br = 2.40 / wheel_radius_;
-    } else if (t <= 2.5 * tau) {
-        target_vel_fl = 1.50 / wheel_radius_;
-        target_vel_fr = 2.10 / wheel_radius_;
-        target_vel_bl = 1.50 / wheel_radius_;
-        target_vel_br = 2.10 / wheel_radius_;
-    } else if (t <= 3.47 * tau) {
-        target_vel_fl = 1.20 / wheel_radius_;
-        target_vel_fr = 2.40 / wheel_radius_;
-        target_vel_bl = 1.20 / wheel_radius_;
-        target_vel_br = 2.40 / wheel_radius_;
-    } else {
-        target_vel_fl = 0.0;
-        target_vel_fr = 0.0;
-        target_vel_bl = 0.0;
-        target_vel_br = 0.0;
-    }
+    double target_vel_fl = 2 * v_fl / wheel_radius_;
+    double target_vel_fr = 2 * v_fr / wheel_radius_;
+    double target_vel_bl = 2 * v_bl / wheel_radius_;
+    double target_vel_br = 2 * v_br / wheel_radius_;
 
     double current_vel_fl = front_left_joint_.getVelocity();
     double current_vel_fr = front_right_joint_.getVelocity();
@@ -132,7 +155,7 @@ void HeroChassisController::update(const ros::Time &time, const ros::Duration &p
     // 正运动学矩阵 (逆矩阵推导得出)
     double base_vx = (vx_fl + vx_fr + vx_bl + vx_br) / 4.0;
     double base_vy = (-vx_fl + vx_fr + vx_bl - vx_br) / 4.0;
-    double base_wz = (-vx_fl + vx_fr - vx_bl + vx_br) / (4.0 * l_sum);
+    double base_wz = (-vx_fl + vx_fr - vx_bl + vx_br) / (4.0 * L);
 
     // 时间积分 (计算这段时间走了多远)
     double dt = (time - last_time_).toSec();
